@@ -42,6 +42,7 @@ import {
 type ServerExtensions = {
   code?: string;
   fields?: ReadonlyArray<ErrorField>;
+  status?: number;
 };
 
 /**
@@ -95,7 +96,12 @@ function safeGraphQLUserMessage(err: unknown): string {
 function extractExtensions(err: ClientError): ServerExtensions | undefined {
   const errors = err.response.errors ?? [];
   const withCode = errors.find((e) => typeof e?.extensions?.code === "string");
-  const extensions = (withCode ?? errors[0])?.extensions;
+  const withFields = errors.find(
+    (e) =>
+      Array.isArray((e?.extensions as { fields?: unknown } | undefined)?.fields) &&
+      ((e?.extensions as { fields?: unknown[] } | undefined)?.fields?.length ?? 0) > 0,
+  );
+  const extensions = (withCode ?? withFields ?? errors[0])?.extensions;
   return extensions as ServerExtensions | undefined;
 }
 
@@ -145,23 +151,38 @@ export function mapGraphQLError(err: unknown): CliError {
   const ctx = networkContextFromClientError(err);
   const ext = extractExtensions(err);
   const code = ext?.code;
+  const fieldCodes = (ext?.fields ?? [])
+    .map((field) => field.code)
+    .filter((value): value is string => typeof value === "string");
 
-  if (code === "VALIDATION_ERROR") {
+  if (code === "VALIDATION_ERROR" || fieldCodes.includes("INVALID_FIELD")) {
     return new ValidationError({ message, userMessage, fields: ext?.fields });
   }
   if (code === "AUTH_ERROR" || code === "UNAUTHORIZED") {
     return new AuthenticationError({ message, userMessage, ...ctx });
   }
-  if (code === "FORBIDDEN" || code === "INSUFFICIENT_PERMISSIONS") {
+  if (
+    code === "FORBIDDEN" ||
+    code === "INSUFFICIENT_PERMISSIONS" ||
+    fieldCodes.includes("INSUFFICIENT_PERMISSIONS")
+  ) {
     return new ForbiddenError({ message, userMessage, ...ctx });
   }
-  if (code === "NOT_FOUND" || code?.endsWith("_NOT_FOUND")) {
+  if (
+    code === "NOT_FOUND" ||
+    code?.endsWith("_NOT_FOUND") ||
+    fieldCodes.some((value) => value.endsWith("_NOT_FOUND"))
+  ) {
     return new NotFoundError({ message, userMessage, ...ctx });
   }
-  if (code?.endsWith("_CONFLICT")) {
+  if (code?.endsWith("_CONFLICT") || fieldCodes.some((value) => value.endsWith("_CONFLICT"))) {
     return new ConflictError({ message, userMessage, ...ctx });
   }
-  if (code === "RATE_LIMIT_EXCEEDED" || code === "RATE_LIMIT") {
+  if (
+    code === "RATE_LIMIT_EXCEEDED" ||
+    code === "RATE_LIMIT" ||
+    fieldCodes.includes("RATE_LIMIT")
+  ) {
     return new RateLimitError({ message, userMessage, ...ctx });
   }
   return new NetworkError({ message, userMessage, ...ctx });
