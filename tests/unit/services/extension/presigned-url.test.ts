@@ -1,5 +1,6 @@
 import { getUploadTargetEffect } from "@/services/extension/presigned-url";
 import * as Effect from "effect/Effect";
+import { ClientError } from "graphql-request";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   extractFailure,
@@ -161,6 +162,65 @@ describe("presigned-url service", () => {
       expect(err.message).toContain(
         "Failed to generate upload URL: empty response",
       );
+    });
+
+    // Regression guard: the presigned-URL service must route server-side
+    // GraphQL errors through `mapGraphQLError` (not collapse everything
+    // into a generic NetworkError). See src/services/graphql-error.ts.
+    describe("server error classification (via mapGraphQLError)", () => {
+      function rejectWithClientError(
+        code: string,
+        message = "server error",
+        status = 200,
+      ) {
+        mockRequest.mockRejectedValue(
+          new ClientError(
+            {
+              data: null,
+              errors: [{ message, extensions: { code } }],
+              status,
+              headers: new Headers(),
+            },
+            { query: "mutation {}" },
+          ),
+        );
+      }
+
+      it.each([
+        ["NOT_FOUND", "NotFoundError"],
+        ["APPLICATION_NOT_FOUND", "NotFoundError"],
+        ["DUPLICATE_CONFLICT", "ConflictError"],
+        ["STATE_CONFLICT", "ConflictError"],
+        ["FORBIDDEN", "ForbiddenError"],
+        ["INSUFFICIENT_PERMISSIONS", "ForbiddenError"],
+        ["RATE_LIMIT_EXCEEDED", "RateLimitError"],
+        ["VALIDATION_ERROR", "ValidationError"],
+        ["AUTH_ERROR", "AuthenticationError"],
+      ])("routes %s -> %s", async (code, expectedTag) => {
+        rejectWithClientError(code);
+
+        const exit = await runEffectExit(
+          getUploadTargetEffect(
+            { applicationId: "app-123", releaseId: "release-456" },
+            "test-access-token",
+          ),
+        );
+        const err = extractFailure(exit) as { _tag: string };
+        expect(err._tag).toBe(expectedTag);
+      });
+
+      it("falls back to NetworkError for unknown codes", async () => {
+        rejectWithClientError("OAUTH_CLIENT_UPSTREAM_ERROR");
+
+        const exit = await runEffectExit(
+          getUploadTargetEffect(
+            { applicationId: "app-123", releaseId: "release-456" },
+            "test-access-token",
+          ),
+        );
+        const err = extractFailure(exit) as { _tag: string };
+        expect(err._tag).toBe("NetworkError");
+      });
     });
   });
 });

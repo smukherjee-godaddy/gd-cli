@@ -3,6 +3,7 @@ import type { ValidationError as EffectValidationError } from "@effect/cli/Valid
 import {
   type ApiErrorContext,
   type CliError,
+  type ValidationError,
   errorCode,
 } from "../../effect/errors";
 
@@ -97,17 +98,51 @@ function fromTaggedError(error: CliError): AgentErrorDetails {
   const details = apiDetails(error);
 
   switch (error._tag) {
-    case "ValidationError":
+    case "ValidationError": {
+      const fields = (error as ValidationError).fields;
+      const hasFields = Array.isArray(fields) && fields.length > 0;
       return {
         message,
         code,
-        fix: "Review command arguments and try again with valid values.",
+        fix: hasFields
+          ? "Review the per-field issues in error.details.fields and retry with valid values."
+          : "Review command arguments and try again with valid values.",
+        details: hasFields ? { fields } : undefined,
       };
+    }
     case "AuthenticationError":
       return {
         message,
         code: "AUTH_REQUIRED",
         fix: "Run: godaddy auth login",
+        details,
+      };
+    case "ForbiddenError":
+      return {
+        message,
+        code,
+        fix: "Your account or token lacks permission for this operation. Contact your org admin, or switch environments with: godaddy env use <environment>.",
+        details,
+      };
+    case "NotFoundError":
+      return {
+        message,
+        code,
+        fix: "Use 'godaddy application list' to find the correct name/id, or create the resource first.",
+        details,
+      };
+    case "ConflictError":
+      return {
+        message,
+        code,
+        fix: "Resolve the conflicting state shown in error.details.response (see errors[].extensions.fields for the specific field/value) and retry.",
+        details,
+      };
+    case "RateLimitError":
+      return {
+        message,
+        code,
+        fix: "Rate limit exceeded. Retry later; inspect error.details.response for any retry-after hint from the server.",
         details,
       };
     case "ConfigurationError":
@@ -184,6 +219,10 @@ function isTaggedError(error: unknown): error is CliError {
       "ValidationError",
       "NetworkError",
       "AuthenticationError",
+      "ForbiddenError",
+      "NotFoundError",
+      "ConflictError",
+      "RateLimitError",
       "ConfigurationError",
       "SecurityError",
     ].includes((error as { _tag: string })._tag)
