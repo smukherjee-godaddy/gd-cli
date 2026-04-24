@@ -4,6 +4,7 @@ import { graphql } from "gql.tada";
 import { ClientError } from "graphql-request";
 import { AuthenticationError, NetworkError } from "../effect/errors";
 import { getRequestHeaders, makeGraphQLClientEffect } from "./http-helpers";
+import { publicHttpUrl } from "./public-url";
 
 const ApplicationQuery = graphql(`
   query Application($name: String!) {
@@ -144,8 +145,8 @@ export const applicationInput = type({
   label: "string",
   name: "string",
   description: "string",
-  url: type.keywords.string.url.root,
-  proxyUrl: type.keywords.string.url.root,
+  url: publicHttpUrl,
+  proxyUrl: publicHttpUrl,
   authorizationScopes: type.string.array().moreThanLength(0),
 });
 
