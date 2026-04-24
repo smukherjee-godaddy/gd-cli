@@ -311,6 +311,10 @@ describe("GraphQL error → CLI error class mapping", () => {
   });
 
   test("classified error is picked even when errors[0] lacks a code", async () => {
+    // Regression: `message` and `_tag` must come from the same error entry.
+    // A prior implementation read `message` from `errors[0]` while picking
+    // `extensions.code` from a later entry, producing correctly-tagged CLI
+    // errors with an unrelated message attached.
     withValidAuth();
 
     mockGraphQLErrorResponse([
@@ -326,7 +330,79 @@ describe("GraphQL error → CLI error class mapping", () => {
     );
     const err = extractFailure(exit) as CliError;
     expect(err._tag).toBe("ValidationError");
+    expect(err.message).toContain("Validation failed: url: Invalid URL");
+    expect(err.message).toContain("VALIDATION_ERROR");
+    expect(err.message).not.toContain("Partial failure without a code");
   });
+
+  test("no error carries a code → NetworkError with errors[0].message", async () => {
+    // Sub-case of the above: when nothing classifies, fall back to errors[0]
+    // consistently for both tag and message.
+    withValidAuth();
+
+    mockGraphQLErrorResponse([
+      { message: "First failure without a code" },
+      { message: "Second failure also without a code" },
+    ]);
+
+    const exit = await runEffectExit(
+      getApplicationEffect("x", { accessToken: "test-token-123" }),
+    );
+    const err = extractFailure(exit) as CliError;
+    expect(err._tag).toBe("NetworkError");
+    expect(err.message).toContain("First failure without a code");
+    expect(err.message).not.toContain("Second failure");
+  });
+
+  test("non-array extensions.fields does not crash the mapper", async () => {
+    // Defensive: if the server sends a malformed `fields` (e.g. string or
+    // object instead of array), classification must not throw inside `.map`.
+    // Falls through to NetworkError since no classification can be derived.
+    withValidAuth();
+
+    mockGraphQLErrorResponse({
+      message: "Shape drift from upstream",
+      extensions: {
+        fields: "not-an-array" as unknown as Record<string, unknown>,
+      },
+    });
+
+    const exit = await runEffectExit(
+      getApplicationEffect("x", { accessToken: "test-token-123" }),
+    );
+    const err = extractFailure(exit) as CliError;
+    expect(err._tag).toBe("NetworkError");
+    expect(err.message).toContain("Shape drift from upstream");
+  });
+
+  test.each<{ fieldCode: string; expectedTag: CliError["_tag"] }>([
+    { fieldCode: "INVALID_FIELD", expectedTag: "ValidationError" },
+    { fieldCode: "INSUFFICIENT_PERMISSIONS", expectedTag: "ForbiddenError" },
+    { fieldCode: "APPLICATION_NOT_FOUND", expectedTag: "NotFoundError" },
+    { fieldCode: "STATE_CONFLICT", expectedTag: "ConflictError" },
+    { fieldCode: "RATE_LIMIT", expectedTag: "RateLimitError" },
+  ])(
+    "field-level code $fieldCode classifies to $expectedTag",
+    async ({ fieldCode, expectedTag }) => {
+      // app-registry-api emits some classifications only via
+      // `extensions.fields[].code`, with no top-level `extensions.code`.
+      // The mapper must honor both placements.
+      withValidAuth();
+
+      mockGraphQLErrorResponse({
+        message: `Field-level ${fieldCode}`,
+        extensions: {
+          fields: [{ code: fieldCode, message: "details", path: "x" }],
+        },
+      });
+
+      const exit = await runEffectExit(
+        getApplicationEffect("x", { accessToken: "test-token-123" }),
+      );
+      const err = extractFailure(exit) as CliError;
+      expect(err._tag).toBe(expectedTag);
+    },
+  );
 
   test("unclassified server code produces GraphQL-aware fix string in envelope", async () => {
     // End-to-end check: the NetworkError fallback branch must carry a
