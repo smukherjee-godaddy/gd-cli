@@ -5,30 +5,34 @@ import { mapRuntimeError } from "../../src/cli/agent/errors";
 import type {
   AuthenticationError,
   CliError,
-  ConflictError,
-  ForbiddenError,
   NetworkError,
-  NotFoundError,
-  RateLimitError,
-  ValidationError,
+  ServerError,
 } from "../../src/effect/errors";
 import { getApplicationEffect } from "../../src/services/applications";
 import { extractFailure, runEffectExit } from "../setup/effect-test-utils";
 import { server } from "../setup/msw-server";
 import { withNoAuth, withValidAuth } from "../setup/test-utils";
 
+// Test shape convention: `expect(err.status).toBe(200)` on error paths
+// is intentional — GraphQL conventionally returns HTTP 200 with an
+// `errors[]` body, and the mapper preserves that status in
+// `ApiErrorContext` as the transport-level signal.
+
+// `message` is optional on the wire — real GraphQL responses can carry
+// errors with only `extensions`, and several tests exercise that path.
 type GraphQLMockError = {
-  message: string;
+  message?: string;
   extensions?: Record<string, unknown>;
 };
 
 function mockGraphQLErrorResponse(
   error: GraphQLMockError | GraphQLMockError[],
+  status = 200,
 ) {
   const errors = Array.isArray(error) ? error : [error];
   server.use(
     graphql.operation(() =>
-      HttpResponse.json({ data: null, errors }, { status: 200 }),
+      HttpResponse.json({ data: null, errors }, { status }),
     ),
   );
 }
@@ -96,7 +100,7 @@ describe("GraphQL error → CLI error class mapping", () => {
   // useful code and fix string, rather than collapsing every server error
   // into NETWORK_ERROR.
 
-  test("VALIDATION_ERROR extensions code → ValidationError", async () => {
+  test("VALIDATION_ERROR extensions code → ServerError { kind: 'VALIDATION' }", async () => {
     withValidAuth();
 
     mockGraphQLErrorResponse({
@@ -107,12 +111,16 @@ describe("GraphQL error → CLI error class mapping", () => {
     const exit = await runEffectExit(
       getApplicationEffect("x", { accessToken: "test-token-123" }),
     );
-    const err = extractFailure(exit) as CliError;
-    expect(err._tag).toBe("ValidationError");
+    const err = extractFailure(exit) as ServerError;
+    expect(err._tag).toBe("ServerError");
+    expect(err.kind).toBe("VALIDATION");
     expect(err.message).toContain("Validation failed");
+
+    const envelope = mapRuntimeError(err);
+    expect(envelope.code).toBe("VALIDATION_ERROR");
   });
 
-  test("VALIDATION_ERROR forwards extensions.fields onto ValidationError", async () => {
+  test("VALIDATION_ERROR forwards extensions.fields onto ServerError", async () => {
     withValidAuth();
 
     const fields = [
@@ -137,9 +145,14 @@ describe("GraphQL error → CLI error class mapping", () => {
     const exit = await runEffectExit(
       getApplicationEffect("x", { accessToken: "test-token-123" }),
     );
-    const err = extractFailure(exit) as ValidationError;
-    expect(err._tag).toBe("ValidationError");
+    const err = extractFailure(exit) as ServerError;
+    expect(err._tag).toBe("ServerError");
+    expect(err.kind).toBe("VALIDATION");
     expect(err.fields).toEqual(fields);
+
+    // Fields must also surface in the agent envelope under details.fields.
+    const envelope = mapRuntimeError(err);
+    expect(envelope.details?.fields).toEqual(fields);
   });
 
   test.each(["AUTH_ERROR", "UNAUTHORIZED"])(
@@ -167,12 +180,11 @@ describe("GraphQL error → CLI error class mapping", () => {
   );
 
   test.each(["FORBIDDEN", "INSUFFICIENT_PERMISSIONS"])(
-    "%s extensions code → ForbiddenError",
+    "%s extensions code → ServerError { kind: 'FORBIDDEN' }",
     async (code) => {
-      // FORBIDDEN and INSUFFICIENT_PERMISSIONS are authorization failures
-      // (the caller is authenticated but lacks the required permission).
-      // They must surface as a distinct CLI class so the envelope points at
-      // a permission fix, not a re-login.
+      // FORBIDDEN / INSUFFICIENT_PERMISSIONS are authorization failures —
+      // caller is authenticated but lacks the required permission. The
+      // envelope must point at a permission fix, not a re-login.
       withValidAuth();
 
       mockGraphQLErrorResponse({
@@ -183,8 +195,9 @@ describe("GraphQL error → CLI error class mapping", () => {
       const exit = await runEffectExit(
         getApplicationEffect("x", { accessToken: "test-token-123" }),
       );
-      const err = extractFailure(exit) as ForbiddenError;
-      expect(err._tag).toBe("ForbiddenError");
+      const err = extractFailure(exit) as ServerError;
+      expect(err._tag).toBe("ServerError");
+      expect(err.kind).toBe("FORBIDDEN");
       expect(err.status).toBe(200);
       expect(err.responseBody).toBeDefined();
 
@@ -195,11 +208,11 @@ describe("GraphQL error → CLI error class mapping", () => {
   );
 
   test.each(["NOT_FOUND", "APPLICATION_NOT_FOUND", "RELEASE_NOT_FOUND"])(
-    "%s extensions code → NotFoundError",
+    "%s extensions code → ServerError { kind: 'NOT_FOUND' }",
     async (code) => {
       // app-registry-api's NotFoundError emits `code: "NOT_FOUND"` at the
-      // top level and `<RESOURCE>_NOT_FOUND` in fields[].code. We match both
-      // on the wire so either representation resolves to NotFoundError.
+      // top level and `<RESOURCE>_NOT_FOUND` in fields[].code. The explicit
+      // CODE_MAP enumerates both forms so either classifies correctly.
       withValidAuth();
 
       mockGraphQLErrorResponse({
@@ -210,8 +223,9 @@ describe("GraphQL error → CLI error class mapping", () => {
       const exit = await runEffectExit(
         getApplicationEffect("x", { accessToken: "test-token-123" }),
       );
-      const err = extractFailure(exit) as NotFoundError;
-      expect(err._tag).toBe("NotFoundError");
+      const err = extractFailure(exit) as ServerError;
+      expect(err._tag).toBe("ServerError");
+      expect(err.kind).toBe("NOT_FOUND");
       expect(err.status).toBe(200);
       expect(err.responseBody).toBeDefined();
 
@@ -222,11 +236,8 @@ describe("GraphQL error → CLI error class mapping", () => {
   );
 
   test.each(["DUPLICATE_CONFLICT", "STATE_CONFLICT", "VERSION_CONFLICT"])(
-    "%s extensions code → ConflictError",
+    "%s extensions code → ServerError { kind: 'CONFLICT' }",
     async (code) => {
-      // ConflictError's wire code is always `<CONFLICTTYPE>_CONFLICT`
-      // (see app-registry-api packages/errors/src/conflict-error.ts).
-      // `archive` throws these when the app is in an incompatible state.
       withValidAuth();
 
       mockGraphQLErrorResponse({
@@ -237,8 +248,9 @@ describe("GraphQL error → CLI error class mapping", () => {
       const exit = await runEffectExit(
         getApplicationEffect("x", { accessToken: "test-token-123" }),
       );
-      const err = extractFailure(exit) as ConflictError;
-      expect(err._tag).toBe("ConflictError");
+      const err = extractFailure(exit) as ServerError;
+      expect(err._tag).toBe("ServerError");
+      expect(err.kind).toBe("CONFLICT");
       expect(err.status).toBe(200);
       expect(err.responseBody).toBeDefined();
 
@@ -249,12 +261,12 @@ describe("GraphQL error → CLI error class mapping", () => {
   );
 
   test.each(["RATE_LIMIT_EXCEEDED", "RATE_LIMIT"])(
-    "%s extensions code → RateLimitError",
+    "%s extensions code → ServerError { kind: 'RATE_LIMITED' }",
     async (code) => {
       // RateLimitError emits `code: "RATE_LIMIT_EXCEEDED"` at top level and
-      // `code: "RATE_LIMIT"` in fields[]. Reachable from application `create`
-      // when the downstream OAuth client classifier maps a 429 via
-      // `errorForStatus`. Match both forms for robustness.
+      // `code: "RATE_LIMIT"` in fields[]. The envelope code matches the
+      // server's wire code (`RATE_LIMIT_EXCEEDED`) so agents that speak
+      // the server taxonomy don't have to translate.
       withValidAuth();
 
       mockGraphQLErrorResponse({
@@ -265,13 +277,14 @@ describe("GraphQL error → CLI error class mapping", () => {
       const exit = await runEffectExit(
         getApplicationEffect("x", { accessToken: "test-token-123" }),
       );
-      const err = extractFailure(exit) as RateLimitError;
-      expect(err._tag).toBe("RateLimitError");
+      const err = extractFailure(exit) as ServerError;
+      expect(err._tag).toBe("ServerError");
+      expect(err.kind).toBe("RATE_LIMITED");
       expect(err.status).toBe(200);
       expect(err.responseBody).toBeDefined();
 
       const envelope = mapRuntimeError(err);
-      expect(envelope.code).toBe("RATE_LIMITED");
+      expect(envelope.code).toBe("RATE_LIMIT_EXCEEDED");
       expect(envelope.fix).toMatch(/rate limit/i);
     },
   );
@@ -311,10 +324,11 @@ describe("GraphQL error → CLI error class mapping", () => {
   });
 
   test("classified error is picked even when errors[0] lacks a code", async () => {
-    // Regression: `message` and `_tag` must come from the same error entry.
-    // A prior implementation read `message` from `errors[0]` while picking
-    // `extensions.code` from a later entry, producing correctly-tagged CLI
-    // errors with an unrelated message attached.
+    // Regression: `message`, `_tag`, and `kind` must all come from the same
+    // error entry. A prior implementation read `message` from `errors[0]`
+    // while picking classification from a later entry, producing a correctly
+    // classified CLI error with an unrelated message attached. The pick-once
+    // refactor in `mapGraphQLError` makes that invariant structural.
     withValidAuth();
 
     mockGraphQLErrorResponse([
@@ -328,8 +342,9 @@ describe("GraphQL error → CLI error class mapping", () => {
     const exit = await runEffectExit(
       getApplicationEffect("x", { accessToken: "test-token-123" }),
     );
-    const err = extractFailure(exit) as CliError;
-    expect(err._tag).toBe("ValidationError");
+    const err = extractFailure(exit) as ServerError;
+    expect(err._tag).toBe("ServerError");
+    expect(err.kind).toBe("VALIDATION");
     expect(err.message).toContain("Validation failed: url: Invalid URL");
     expect(err.message).toContain("VALIDATION_ERROR");
     expect(err.message).not.toContain("Partial failure without a code");
@@ -375,15 +390,15 @@ describe("GraphQL error → CLI error class mapping", () => {
     expect(err.message).toContain("Shape drift from upstream");
   });
 
-  test.each<{ fieldCode: string; expectedTag: CliError["_tag"] }>([
-    { fieldCode: "INVALID_FIELD", expectedTag: "ValidationError" },
-    { fieldCode: "INSUFFICIENT_PERMISSIONS", expectedTag: "ForbiddenError" },
-    { fieldCode: "APPLICATION_NOT_FOUND", expectedTag: "NotFoundError" },
-    { fieldCode: "STATE_CONFLICT", expectedTag: "ConflictError" },
-    { fieldCode: "RATE_LIMIT", expectedTag: "RateLimitError" },
+  test.each<{ fieldCode: string; expectedKind: ServerError["kind"] }>([
+    { fieldCode: "INVALID_FIELD", expectedKind: "VALIDATION" },
+    { fieldCode: "INSUFFICIENT_PERMISSIONS", expectedKind: "FORBIDDEN" },
+    { fieldCode: "APPLICATION_NOT_FOUND", expectedKind: "NOT_FOUND" },
+    { fieldCode: "STATE_CONFLICT", expectedKind: "CONFLICT" },
+    { fieldCode: "RATE_LIMIT", expectedKind: "RATE_LIMITED" },
   ])(
-    "field-level code $fieldCode classifies to $expectedTag",
-    async ({ fieldCode, expectedTag }) => {
+    "field-level code $fieldCode classifies to ServerError { kind: $expectedKind }",
+    async ({ fieldCode, expectedKind }) => {
       // app-registry-api emits some classifications only via
       // `extensions.fields[].code`, with no top-level `extensions.code`.
       // The mapper must honor both placements.
@@ -399,10 +414,86 @@ describe("GraphQL error → CLI error class mapping", () => {
       const exit = await runEffectExit(
         getApplicationEffect("x", { accessToken: "test-token-123" }),
       );
-      const err = extractFailure(exit) as CliError;
-      expect(err._tag).toBe(expectedTag);
+      const err = extractFailure(exit) as ServerError;
+      expect(err._tag).toBe("ServerError");
+      expect(err.kind).toBe(expectedKind);
     },
   );
+
+  test("unknown code ending in _NOT_FOUND does NOT mis-classify", async () => {
+    // The old `endsWith('_NOT_FOUND')` heuristic would capture codes like
+    // `POLICY_NOT_FOUND_IN_CACHE` that aren't genuine resource-not-found
+    // failures. The explicit CODE_MAP keeps classification opt-in; novel
+    // codes fall through to NetworkError with context preserved.
+    withValidAuth();
+
+    mockGraphQLErrorResponse({
+      message: "Cache miss",
+      extensions: { code: "POLICY_NOT_FOUND_IN_CACHE" },
+    });
+
+    const exit = await runEffectExit(
+      getApplicationEffect("x", { accessToken: "test-token-123" }),
+    );
+    const err = extractFailure(exit) as NetworkError;
+    expect(err._tag).toBe("NetworkError");
+    expect(JSON.stringify(err.responseBody)).toContain(
+      "POLICY_NOT_FOUND_IN_CACHE",
+    );
+  });
+
+  test("classified userMessage never contradicts the classification (status-canned strings stay on NetworkError fallback)", async () => {
+    // Regression: previously, a single `userMessageFromPrimary` ran for
+    // both classified and unclassified branches. A classified error with
+    // no per-entry message would silently pick up a status-derived canned
+    // string — e.g. an HTTP 401 carrying `extensions.code: FORBIDDEN`
+    // would surface "Run 'godaddy auth login'" as the userMessage of a
+    // ServerError { kind: "FORBIDDEN" }, contradicting its own class.
+    // The mapper now only consults HTTP status on the NetworkError path.
+    withValidAuth();
+
+    mockGraphQLErrorResponse(
+      { extensions: { code: "FORBIDDEN" } }, // no `message`
+      401, // status that would otherwise canned-string to "Run godaddy auth login"
+    );
+
+    const exit = await runEffectExit(
+      getApplicationEffect("x", { accessToken: "test-token-123" }),
+    );
+    const err = extractFailure(exit) as ServerError;
+    expect(err._tag).toBe("ServerError");
+    expect(err.kind).toBe("FORBIDDEN");
+    expect(err.userMessage).toBe("An unexpected error occurred");
+    expect(err.userMessage).not.toContain("godaddy auth login");
+    expect(err.userMessage).not.toContain("Access denied");
+
+    // The envelope's `fix` (not `userMessage`) is what carries the
+    // classification-appropriate guidance.
+    const envelope = mapRuntimeError(err);
+    expect(envelope.code).toBe("FORBIDDEN");
+    expect(envelope.fix).toMatch(/permission/i);
+  });
+
+  test("NetworkError fallback still uses HTTP-status canned strings when no primary message", async () => {
+    // The flip side of the regression above: status-based canned strings
+    // remain useful on the unclassified path, where there's no
+    // classification to contradict.
+    withValidAuth();
+
+    mockGraphQLErrorResponse(
+      [{ extensions: { code: "OAUTH_CLIENT_UPSTREAM_ERROR" } }], // unknown code, no message
+      503,
+    );
+
+    const exit = await runEffectExit(
+      getApplicationEffect("x", { accessToken: "test-token-123" }),
+    );
+    const err = extractFailure(exit) as NetworkError;
+    expect(err._tag).toBe("NetworkError");
+    expect(err.userMessage).toBe(
+      "The server encountered an error. Please try again later.",
+    );
+  });
 
   test("unclassified server code produces GraphQL-aware fix string in envelope", async () => {
     // End-to-end check: the NetworkError fallback branch must carry a

@@ -186,28 +186,42 @@ describe("presigned-url service", () => {
         );
       }
 
-      it.each([
-        ["NOT_FOUND", "NotFoundError"],
-        ["APPLICATION_NOT_FOUND", "NotFoundError"],
-        ["DUPLICATE_CONFLICT", "ConflictError"],
-        ["STATE_CONFLICT", "ConflictError"],
-        ["FORBIDDEN", "ForbiddenError"],
-        ["INSUFFICIENT_PERMISSIONS", "ForbiddenError"],
-        ["RATE_LIMIT_EXCEEDED", "RateLimitError"],
-        ["VALIDATION_ERROR", "ValidationError"],
-        ["AUTH_ERROR", "AuthenticationError"],
-      ])("routes %s -> %s", async (code, expectedTag) => {
-        rejectWithClientError(code);
+      // GraphQL conventionally returns HTTP 200 with an `errors[]` body;
+      // the CLI preserves that status in `ApiErrorContext`. Classified
+      // failures surface as `ServerError { kind }` (with `AUTH_ERROR` /
+      // `UNAUTHORIZED` routed to `AuthenticationError`). Unknown codes
+      // fall through to `NetworkError` with full context preserved.
+      it.each<[string, string, string | undefined]>([
+        ["NOT_FOUND", "ServerError", "NOT_FOUND"],
+        ["APPLICATION_NOT_FOUND", "ServerError", "NOT_FOUND"],
+        ["DUPLICATE_CONFLICT", "ServerError", "CONFLICT"],
+        ["STATE_CONFLICT", "ServerError", "CONFLICT"],
+        ["FORBIDDEN", "ServerError", "FORBIDDEN"],
+        ["INSUFFICIENT_PERMISSIONS", "ServerError", "FORBIDDEN"],
+        ["RATE_LIMIT_EXCEEDED", "ServerError", "RATE_LIMITED"],
+        ["VALIDATION_ERROR", "ServerError", "VALIDATION"],
+        ["AUTH_ERROR", "AuthenticationError", undefined],
+      ])(
+        "routes %s -> %s (kind=%s)",
+        async (code, expectedTag, expectedKind) => {
+          rejectWithClientError(code);
 
-        const exit = await runEffectExit(
-          getUploadTargetEffect(
-            { applicationId: "app-123", releaseId: "release-456" },
-            "test-access-token",
-          ),
-        );
-        const err = extractFailure(exit) as { _tag: string };
-        expect(err._tag).toBe(expectedTag);
-      });
+          const exit = await runEffectExit(
+            getUploadTargetEffect(
+              { applicationId: "app-123", releaseId: "release-456" },
+              "test-access-token",
+            ),
+          );
+          const err = extractFailure(exit) as {
+            _tag: string;
+            kind?: string;
+          };
+          expect(err._tag).toBe(expectedTag);
+          if (expectedKind !== undefined) {
+            expect(err.kind).toBe(expectedKind);
+          }
+        },
+      );
 
       it("falls back to NetworkError for unknown codes", async () => {
         rejectWithClientError("OAUTH_CLIENT_UPSTREAM_ERROR");

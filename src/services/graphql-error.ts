@@ -4,18 +4,15 @@
  * Used by every service module that talks to `app-registry-api`
  * (`applications.ts`, `extension/presigned-url.ts`, future additions).
  * Keeping the classification logic here guarantees every GraphQL call
- * produces envelopes with consistent top-level `code` + `fix` values,
- * and makes it trivial to extend the mapping when the server adds new
- * `errors[].extensions.code` values.
+ * produces envelopes with consistent top-level `code` + `fix` values.
  *
- * Contract summary (see `mapGraphQLError` for the full table):
- *   - `VALIDATION_ERROR`                          -> `ValidationError` (forwards `fields`)
- *   - `AUTH_ERROR`, `UNAUTHORIZED`                -> `AuthenticationError`
- *   - `FORBIDDEN`, `INSUFFICIENT_PERMISSIONS`     -> `ForbiddenError`
- *   - `NOT_FOUND`, `*_NOT_FOUND`                  -> `NotFoundError`
- *   - `*_CONFLICT`                                -> `ConflictError`
- *   - `RATE_LIMIT_EXCEEDED`, `RATE_LIMIT`         -> `RateLimitError`
- *   - unknown / future codes / transport failure  -> `NetworkError` (HTTP context preserved)
+ * Classification is driven by an explicit `CODE_MAP` — codes we know
+ * about are routed to `ServerError { kind }`; everything else falls
+ * through to `NetworkError` with full HTTP context preserved so agents
+ * can still discriminate via the server's original `extensions.code` in
+ * `details.response`. Opt-in classification (no `endsWith` wildcards)
+ * prevents codes like `POLICY_NOT_FOUND_IN_CACHE` from being captured
+ * incorrectly.
  *
  * Defensive posture: every wire-shape assumption is runtime-guarded
  * (`typeof`, `Array.isArray`) so a server-side response reshuffle or
@@ -23,36 +20,48 @@
  * thrown exception inside the CLI.
  */
 
-import { ClientError } from "graphql-request";
 import {
   type ApiErrorContext,
   AuthenticationError,
   type CliError,
-  ConflictError,
   type ErrorField,
-  ForbiddenError,
   NetworkError,
-  NotFoundError,
-  RateLimitError,
-  ValidationError,
-} from "../effect/errors";
-
-/**
- * Shape of the `extensions` object emitted by app-registry-api's
- * `toGraphQLErrorExtensions` helper. Typed loosely because GraphQL
- * extensions are `Record<string, unknown>` at the wire level — only the
- * fields we actually read are declared, and each is validated at runtime
- * before use.
- */
-type ServerExtensions = {
-  code?: string;
-  fields?: ReadonlyArray<ErrorField>;
-};
+  ServerError,
+  type ServerErrorKind,
+} from "@/effect/errors";
+import { ClientError } from "graphql-request";
 
 /** Untyped wire shape for a single GraphQL error entry. */
 type GraphQLErrorEntry = {
   message?: string;
   extensions?: { code?: unknown; fields?: unknown };
+};
+
+/**
+ * Explicit server-code → classification kind. Sourced from
+ * app-registry-api's `@repo/errors` taxonomy. New codes must be added
+ * here explicitly; unknown codes fall through to `NetworkError` with
+ * the server's original code preserved under `details.response`.
+ *
+ * `AUTH_ERROR` / `UNAUTHORIZED` route to `AuthenticationError` (handled
+ * separately in `mapGraphQLError`) rather than through this map.
+ */
+const CODE_MAP: Readonly<Record<string, ServerErrorKind>> = {
+  VALIDATION_ERROR: "VALIDATION",
+  FORBIDDEN: "FORBIDDEN",
+  INSUFFICIENT_PERMISSIONS: "FORBIDDEN",
+  NOT_FOUND: "NOT_FOUND",
+  APPLICATION_NOT_FOUND: "NOT_FOUND",
+  RELEASE_NOT_FOUND: "NOT_FOUND",
+  SUBSCRIPTION_NOT_FOUND: "NOT_FOUND",
+  ACTION_NOT_FOUND: "NOT_FOUND",
+  POLICY_NOT_FOUND: "NOT_FOUND",
+  DUPLICATE_CONFLICT: "CONFLICT",
+  STATE_CONFLICT: "CONFLICT",
+  VERSION_CONFLICT: "CONFLICT",
+  RATE_LIMIT_EXCEEDED: "RATE_LIMITED",
+  RATE_LIMIT: "RATE_LIMITED",
+  INVALID_FIELD: "VALIDATION",
 };
 
 /**
@@ -74,10 +83,8 @@ function toErrorArray(
  *   2. First error with a non-empty `extensions.fields` array.
  *   3. `errors[0]` as a last resort.
  *
- * Shared by `extractGraphQLError` and `extractExtensions` so the resulting
- * CLI error's `message`, `code`, and `fields` always refer to the same
- * entry — regardless of where the server places the classified error in
- * the `errors` array.
+ * Called once at the top of `mapGraphQLError`; both message extraction
+ * and classification use the same entry by construction.
  */
 function pickPrimaryError(
   errors: ReadonlyArray<GraphQLErrorEntry | undefined>,
@@ -91,14 +98,8 @@ function pickPrimaryError(
   return withFields ?? errors[0];
 }
 
-/**
- * Developer-facing `message` for the resulting CLI error. Uses
- * `pickPrimaryError` so message and classification always come from the
- * same error entry.
- */
-function extractGraphQLError(err: unknown): string {
-  if (!(err instanceof ClientError)) return "An unexpected error occurred";
-  const primary = pickPrimaryError(toErrorArray(err.response.errors));
+/** Developer-facing `message`: `"<server message> (<CODE>)"` when classified. */
+function messageFromPrimary(primary: GraphQLErrorEntry | undefined): string {
   if (!primary) return "An unexpected error occurred";
   const code = primary.extensions?.code;
   const suffix = typeof code === "string" ? ` (${code})` : "";
@@ -106,34 +107,49 @@ function extractGraphQLError(err: unknown): string {
 }
 
 /**
- * Return a safe, user-facing message for a GraphQL error. Avoids leaking
- * internal server details in the top-level envelope `message`; the raw
- * response is still preserved under `details.response` for agents that
- * want to inspect it.
+ * Server's per-entry message, if it gave us one. Both the classified
+ * and `NetworkError` paths prefer this when present.
  */
-function safeGraphQLUserMessage(err: unknown): string {
-  if (err instanceof ClientError) {
-    const status = err.response.status;
-    if (status === 401)
-      return "Authentication failed. Run 'godaddy auth login'.";
-    if (status === 403)
-      return "Access denied. You may not have permission for this operation in the current environment.";
-    if (status === 404) return "The requested resource was not found.";
-    if (status && status >= 500)
-      return "The server encountered an error. Please try again later.";
-    // For 4xx with GraphQL-level error messages, allow the first message
-    // through — these are validation-style errors the user can act on.
-    const errors = toErrorArray(err.response.errors);
-    const first = errors[0]?.message;
-    if (typeof first === "string" && first.length > 0) return first;
-  }
+function primaryMessageOrUndefined(
+  primary: GraphQLErrorEntry | undefined,
+): string | undefined {
+  return typeof primary?.message === "string" && primary.message.length > 0
+    ? primary.message
+    : undefined;
+}
+
+/**
+ * User-facing message for an *unclassified* failure (`NetworkError`
+ * fallback path). HTTP status drives a canned remediation hint when no
+ * per-entry message is available.
+ *
+ * Classified errors deliberately do NOT use this — their `fix` string
+ * already carries the status-appropriate guidance, and a status-derived
+ * `userMessage` could contradict the classification (e.g. a
+ * `ServerError { kind: "FORBIDDEN" }` returned over HTTP 401 would
+ * otherwise pick up "Run godaddy auth login").
+ */
+function networkUserMessage(
+  primary: GraphQLErrorEntry | undefined,
+  status: number | undefined,
+): string {
+  const fromPrimary = primaryMessageOrUndefined(primary);
+  if (fromPrimary !== undefined) return fromPrimary;
+  if (status === 401) return "Authentication failed. Run 'godaddy auth login'.";
+  if (status === 403)
+    return "Access denied. You may not have permission for this operation in the current environment.";
+  if (status === 404) return "The requested resource was not found.";
+  if (typeof status === "number" && status >= 500)
+    return "The server encountered an error. Please try again later.";
   return "An unexpected error occurred";
 }
 
-/** Same selection as `extractGraphQLError` — see `pickPrimaryError`. */
-function extractExtensions(err: ClientError): ServerExtensions | undefined {
-  const primary = pickPrimaryError(toErrorArray(err.response.errors));
-  return primary?.extensions as ServerExtensions | undefined;
+/** Pull `ErrorField[]` off a primary error, guarded at runtime. */
+function fieldsFromPrimary(
+  primary: GraphQLErrorEntry | undefined,
+): ReadonlyArray<ErrorField> | undefined {
+  const raw = primary?.extensions?.fields;
+  return Array.isArray(raw) ? (raw as ReadonlyArray<ErrorField>) : undefined;
 }
 
 /**
@@ -141,14 +157,13 @@ function extractExtensions(err: ClientError): ServerExtensions | undefined {
  * Surfacing `status` + `responseBody` lets `cli/agent/errors.ts` →
  * `fixForNetworkError` produce tailored GraphQL fix hints and preserves
  * the server's original `extensions.code` in `details.response` for
- * agents that want finer-grained classification than the CLI's
- * tagged-error taxonomy.
+ * agents that want finer-grained classification than the CLI taxonomy.
  *
  * `responseBody` is shaped as `{ errors, data }` (matching a standard
- * GraphQL response body) rather than as the raw errors array, because
- * the agent-side `hasGraphqlErrors` detector looks for `.errors` under
- * `details.response`. Headers and other non-body fields are intentionally
- * excluded to avoid `Headers`-instance serialization quirks.
+ * GraphQL response body) because the agent-side `hasGraphqlErrors`
+ * detector looks for `.errors` under `details.response`. Headers and
+ * other non-body fields are intentionally excluded to avoid
+ * `Headers`-instance serialization quirks.
  */
 function networkContextFromClientError(err: ClientError): ApiErrorContext {
   return {
@@ -161,66 +176,88 @@ function networkContextFromClientError(err: ClientError): ApiErrorContext {
 }
 
 /**
+ * Classify a primary error entry into a `ServerErrorKind`, an
+ * `AuthenticationError`, or `null` for "unknown / fall through to
+ * `NetworkError`". Looks at the top-level `extensions.code` first, then
+ * any codes inside `extensions.fields[]` (app-registry-api emits some
+ * classifications only at the field level, e.g. `INVALID_FIELD`,
+ * `RATE_LIMIT`).
+ */
+function classify(
+  primary: GraphQLErrorEntry | undefined,
+  fields: ReadonlyArray<ErrorField> | undefined,
+): ServerErrorKind | "AUTHENTICATION" | null {
+  const code = primary?.extensions?.code;
+  if (typeof code === "string") {
+    if (code === "AUTH_ERROR" || code === "UNAUTHORIZED") {
+      return "AUTHENTICATION";
+    }
+    const kind = CODE_MAP[code];
+    if (kind) return kind;
+  }
+  if (fields) {
+    for (const f of fields) {
+      const fc = f?.code;
+      if (typeof fc === "string") {
+        const kind = CODE_MAP[fc];
+        if (kind) return kind;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Map a GraphQL / transport error to the correct CLI error class.
  *
- * Classification is driven by (a) the top-level `extensions.code` on the
- * selected error entry and (b) any `code` values inside `extensions.fields[]`
- * — app-registry-api emits some classifications only at the field level
- * (e.g. `INVALID_FIELD`, `RATE_LIMIT`). Unknown / future codes fall through
- * to `NetworkError` with full HTTP context preserved so agents can still
- * discriminate via the server's original `extensions.code` in
- * `details.response`.
+ * Emits:
+ *   - `ServerError { kind }` for classified server failures
+ *     (`VALIDATION`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `RATE_LIMITED`).
+ *   - `AuthenticationError` for `AUTH_ERROR` / `UNAUTHORIZED`.
+ *   - `NetworkError` for transport failures and any unclassified server
+ *     response (full HTTP context preserved in either case).
  */
 export function mapGraphQLError(err: unknown): CliError {
-  const message = extractGraphQLError(err);
-  const userMessage = safeGraphQLUserMessage(err);
-
   if (!(err instanceof ClientError)) {
-    return new NetworkError({ message, userMessage });
+    return new NetworkError({
+      message: "An unexpected error occurred",
+      userMessage: "An unexpected error occurred",
+    });
   }
 
+  const primary = pickPrimaryError(toErrorArray(err.response.errors));
+  const message = messageFromPrimary(primary);
   const ctx = networkContextFromClientError(err);
-  const ext = extractExtensions(err);
-  const code = ext?.code;
-  // Runtime guard: `ext.fields` is typed but untrusted at the wire
-  // boundary; a non-array value here would crash the subsequent `.map`.
-  const fields = Array.isArray(ext?.fields) ? ext.fields : undefined;
-  const fieldCodes = (fields ?? [])
-    .map((field) => field.code)
-    .filter((value): value is string => typeof value === "string");
+  const fields = fieldsFromPrimary(primary);
+  const kind = classify(primary, fields);
 
-  if (code === "VALIDATION_ERROR" || fieldCodes.includes("INVALID_FIELD")) {
-    return new ValidationError({ message, userMessage, fields });
+  // For classified errors, the user-facing message is just the server's
+  // own message (the `fix` string carries remediation guidance). The
+  // `NetworkError` fallback is the only path that uses HTTP-status-based
+  // canned strings — so a classification can never be contradicted by
+  // its own user message.
+  const classifiedUserMessage =
+    primaryMessageOrUndefined(primary) ?? "An unexpected error occurred";
+
+  if (kind === "AUTHENTICATION") {
+    return new AuthenticationError({
+      message,
+      userMessage: classifiedUserMessage,
+      ...ctx,
+    });
   }
-  if (code === "AUTH_ERROR" || code === "UNAUTHORIZED") {
-    return new AuthenticationError({ message, userMessage, ...ctx });
+  if (kind !== null) {
+    return new ServerError({
+      kind,
+      message,
+      userMessage: classifiedUserMessage,
+      fields,
+      ...ctx,
+    });
   }
-  if (
-    code === "FORBIDDEN" ||
-    code === "INSUFFICIENT_PERMISSIONS" ||
-    fieldCodes.includes("INSUFFICIENT_PERMISSIONS")
-  ) {
-    return new ForbiddenError({ message, userMessage, ...ctx });
-  }
-  if (
-    code === "NOT_FOUND" ||
-    code?.endsWith("_NOT_FOUND") ||
-    fieldCodes.some((value) => value.endsWith("_NOT_FOUND"))
-  ) {
-    return new NotFoundError({ message, userMessage, ...ctx });
-  }
-  if (
-    code?.endsWith("_CONFLICT") ||
-    fieldCodes.some((value) => value.endsWith("_CONFLICT"))
-  ) {
-    return new ConflictError({ message, userMessage, ...ctx });
-  }
-  if (
-    code === "RATE_LIMIT_EXCEEDED" ||
-    code === "RATE_LIMIT" ||
-    fieldCodes.includes("RATE_LIMIT")
-  ) {
-    return new RateLimitError({ message, userMessage, ...ctx });
-  }
-  return new NetworkError({ message, userMessage, ...ctx });
+  return new NetworkError({
+    message,
+    userMessage: networkUserMessage(primary, err.response.status),
+    ...ctx,
+  });
 }

@@ -1,8 +1,8 @@
+import { AuthenticationError, ValidationError } from "@/effect/errors";
+import { mapGraphQLError } from "@/services/graphql-error";
 import { type } from "arktype";
 import * as Effect from "effect/Effect";
 import { graphql } from "gql.tada";
-import { AuthenticationError, ValidationError } from "../effect/errors";
-import { mapGraphQLError } from "./graphql-error";
 import { getRequestHeaders, makeGraphQLClientEffect } from "./http-helpers";
 
 const ApplicationQuery = graphql(`

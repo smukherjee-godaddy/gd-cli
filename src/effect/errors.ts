@@ -3,16 +3,28 @@ import * as Data from "effect/Data";
 /**
  * Structured per-field validation detail, mirroring app-registry-api's
  * `@repo/errors` `ErrorField` shape. Forwarded from the GraphQL
- * `extensions.fields` entries when a mutation returns a `ValidationError`.
+ * `extensions.fields` entries when a mutation returns a validation error.
+ *
+ * All fields are optional — the wire boundary is defensive, and every
+ * consumer re-validates before use (see `graphql-error.ts`).
  */
 export interface ErrorField {
-  readonly code: string;
+  readonly code?: string;
   readonly message?: string;
   readonly path?: string;
   readonly pathRelated?: string;
   readonly value?: unknown;
 }
 
+/**
+ * Client-side input validation failure — "we rejected your input before
+ * sending it." Raised by arktype when a command argument fails the
+ * service input schema. Deliberately does NOT carry `ApiErrorContext`,
+ * because no request reached the server.
+ *
+ * Server-side validation failures (the server rejected the request) are
+ * represented by `ServerError { kind: "VALIDATION" }`.
+ */
 export class ValidationError extends Data.TaggedError("ValidationError")<{
   readonly message: string;
   readonly userMessage: string;
@@ -45,57 +57,33 @@ export class AuthenticationError extends Data.TaggedError(
 > {}
 
 /**
- * Caller authenticated successfully but is not permitted to perform the
- * requested action. Mirrors app-registry-api's `ForbiddenError` (wire code
- * `FORBIDDEN`, or `INSUFFICIENT_PERMISSIONS` when emitted as a per-field
- * entry). Kept distinct from `AuthenticationError` so the JSON envelope can
- * recommend a permission-fix (not a re-login).
+ * Classification family for server-side failures with known semantics.
+ * Each kind maps to a stable envelope `code` and `fix` string (see
+ * `cli/agent/errors.ts`); the server's original `extensions.code` is
+ * always preserved under `details.response` for agents that need finer
+ * discrimination.
  */
-export class ForbiddenError extends Data.TaggedError("ForbiddenError")<
-  {
-    readonly message: string;
-    readonly userMessage: string;
-  } & ApiErrorContext
-> {}
+export type ServerErrorKind =
+  | "VALIDATION"
+  | "FORBIDDEN"
+  | "NOT_FOUND"
+  | "CONFLICT"
+  | "RATE_LIMITED";
 
 /**
- * Requested resource does not exist. Mirrors app-registry-api's
- * `NotFoundError` (wire code `NOT_FOUND`, with a per-resource
- * `<RESOURCE>_NOT_FOUND` entry in `extensions.fields`). Thrown by the
- * `update`, `enable`, and `archive` application mutations when the target
- * application (or a related resource) cannot be located.
+ * Server-side failure with a known classification. Replaces the former
+ * per-kind classes (`ForbiddenError`, `NotFoundError`, `ConflictError`,
+ * `RateLimitError`, and server-side validation failures): those were
+ * structurally identical and no consumer discriminated on `_tag` in a
+ * type-driven way. One `ServerError` with a `kind` discriminant keeps
+ * the taxonomy open to extension without adding a class per code.
  */
-export class NotFoundError extends Data.TaggedError("NotFoundError")<
+export class ServerError extends Data.TaggedError("ServerError")<
   {
+    readonly kind: ServerErrorKind;
     readonly message: string;
     readonly userMessage: string;
-  } & ApiErrorContext
-> {}
-
-/**
- * Request conflicts with the current state of the resource. Mirrors
- * app-registry-api's `ConflictError`, whose wire code is always of the
- * form `<CONFLICTTYPE>_CONFLICT` (e.g. `DUPLICATE_CONFLICT`,
- * `STATE_CONFLICT`, `VERSION_CONFLICT`). Thrown by `archive` when the
- * application is in an incompatible state for the operation.
- */
-export class ConflictError extends Data.TaggedError("ConflictError")<
-  {
-    readonly message: string;
-    readonly userMessage: string;
-  } & ApiErrorContext
-> {}
-
-/**
- * Request was rate limited. Mirrors app-registry-api's `RateLimitError`
- * (wire code `RATE_LIMIT_EXCEEDED`, with a per-field `RATE_LIMIT` entry).
- * Reachable from the application `create` path when the downstream OAuth
- * client classifier maps a 429 response via `errorForStatus`.
- */
-export class RateLimitError extends Data.TaggedError("RateLimitError")<
-  {
-    readonly message: string;
-    readonly userMessage: string;
+    readonly fields?: ReadonlyArray<ErrorField>;
   } & ApiErrorContext
 > {}
 
@@ -113,12 +101,23 @@ export type CliError =
   | ValidationError
   | NetworkError
   | AuthenticationError
-  | ForbiddenError
-  | NotFoundError
-  | ConflictError
-  | RateLimitError
+  | ServerError
   | ConfigurationError
   | SecurityError;
+
+/**
+ * Envelope `code` for a given `ServerErrorKind`. Aligned with the
+ * server's wire codes where feasible (`RATE_LIMITED` →
+ * `RATE_LIMIT_EXCEEDED`) so agents that speak the server taxonomy don't
+ * have to translate.
+ */
+const SERVER_ERROR_CODE: Record<ServerErrorKind, string> = {
+  VALIDATION: "VALIDATION_ERROR",
+  FORBIDDEN: "FORBIDDEN",
+  NOT_FOUND: "NOT_FOUND",
+  CONFLICT: "CONFLICT",
+  RATE_LIMITED: "RATE_LIMIT_EXCEEDED",
+};
 
 export function errorCode(error: CliError): string {
   switch (error._tag) {
@@ -127,15 +126,12 @@ export function errorCode(error: CliError): string {
     case "NetworkError":
       return "NETWORK_ERROR";
     case "AuthenticationError":
+      // NOTE: `cli/agent/errors.ts` overrides this to `AUTH_REQUIRED` in
+      // the envelope for historical compatibility; aligning the two is
+      // tracked separately, outside DEVX-70.
       return "AUTH_ERROR";
-    case "ForbiddenError":
-      return "FORBIDDEN";
-    case "NotFoundError":
-      return "NOT_FOUND";
-    case "ConflictError":
-      return "CONFLICT";
-    case "RateLimitError":
-      return "RATE_LIMITED";
+    case "ServerError":
+      return SERVER_ERROR_CODE[error.kind];
     case "ConfigurationError":
       return "CONFIG_ERROR";
     case "SecurityError":
