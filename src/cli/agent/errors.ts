@@ -130,7 +130,7 @@ function fromTaggedError(error: CliError): AgentErrorDetails {
     case "AuthenticationError":
       // Envelope emits `AUTH_REQUIRED` (not `errorCode()`'s `AUTH_ERROR`)
       // for historical compatibility with existing agent consumers.
-      // Aligning the two is tracked separately, outside DEVX-70.
+      // Aligning the two values is tracked as a follow-up.
       return {
         message,
         code: "AUTH_REQUIRED",

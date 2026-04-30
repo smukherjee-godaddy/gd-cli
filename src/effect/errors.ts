@@ -127,8 +127,8 @@ export function errorCode(error: CliError): string {
       return "NETWORK_ERROR";
     case "AuthenticationError":
       // NOTE: `cli/agent/errors.ts` overrides this to `AUTH_REQUIRED` in
-      // the envelope for historical compatibility; aligning the two is
-      // tracked separately, outside DEVX-70.
+      // the envelope for historical compatibility with existing agent
+      // consumers; aligning the two values is tracked as a follow-up.
       return "AUTH_ERROR";
     case "ServerError":
       return SERVER_ERROR_CODE[error.kind];
