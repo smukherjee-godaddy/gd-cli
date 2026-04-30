@@ -210,9 +210,9 @@ describe("GraphQL error → CLI error class mapping", () => {
   test.each(["NOT_FOUND", "APPLICATION_NOT_FOUND", "RELEASE_NOT_FOUND"])(
     "%s extensions code → ServerError { kind: 'NOT_FOUND' }",
     async (code) => {
-      // app-registry-api's NotFoundError emits `code: "NOT_FOUND"` at the
-      // top level and `<RESOURCE>_NOT_FOUND` in fields[].code. The explicit
-      // CODE_MAP enumerates both forms so either classifies correctly.
+      // The source of truth emits `code: "NOT_FOUND"` at the top level and
+      // `<RESOURCE>_NOT_FOUND` in fields[].code. The explicit CODE_MAP
+      // enumerates both forms so either classifies correctly.
       withValidAuth();
 
       mockGraphQLErrorResponse({
@@ -399,7 +399,7 @@ describe("GraphQL error → CLI error class mapping", () => {
   ])(
     "field-level code $fieldCode classifies to ServerError { kind: $expectedKind }",
     async ({ fieldCode, expectedKind }) => {
-      // app-registry-api emits some classifications only via
+      // The source of truth emits some classifications only via
       // `extensions.fields[].code`, with no top-level `extensions.code`.
       // The mapper must honor both placements.
       withValidAuth();

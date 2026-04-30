@@ -1,8 +1,8 @@
 /**
  * Shared GraphQL error-to-CLI-error mapper.
  *
- * Used by every service module that talks to `app-registry-api`
- * (`applications.ts`, `extension/presigned-url.ts`, future additions).
+ * Used by every service module that talks to the upstream source of
+ * truth (`applications.ts`, `extension/presigned-url.ts`, future additions).
  * Keeping the classification logic here guarantees every GraphQL call
  * produces envelopes with consistent top-level `code` + `fix` values.
  *
@@ -38,10 +38,10 @@ type GraphQLErrorEntry = {
 };
 
 /**
- * Explicit server-code → classification kind. Sourced from
- * app-registry-api's `@repo/errors` taxonomy. New codes must be added
- * here explicitly; unknown codes fall through to `NetworkError` with
- * the server's original code preserved under `details.response`.
+ * Explicit server-code → classification kind. Sourced from the upstream
+ * source-of-truth error taxonomy. New codes must be added here
+ * explicitly; unknown codes fall through to `NetworkError` with the
+ * server's original code preserved under `details.response`.
  *
  * `AUTH_ERROR` / `UNAUTHORIZED` route to `AuthenticationError` (handled
  * separately in `mapGraphQLError`) rather than through this map.
@@ -179,8 +179,8 @@ function networkContextFromClientError(err: ClientError): ApiErrorContext {
  * Classify a primary error entry into a `ServerErrorKind`, an
  * `AuthenticationError`, or `null` for "unknown / fall through to
  * `NetworkError`". Looks at the top-level `extensions.code` first, then
- * any codes inside `extensions.fields[]` (app-registry-api emits some
- * classifications only at the field level, e.g. `INVALID_FIELD`,
+ * any codes inside `extensions.fields[]` (the source of truth emits
+ * some classifications only at the field level, e.g. `INVALID_FIELD`,
  * `RATE_LIMIT`).
  */
 function classify(

@@ -1,8 +1,8 @@
 import * as Data from "effect/Data";
 
 /**
- * Structured per-field validation detail, mirroring app-registry-api's
- * `@repo/errors` `ErrorField` shape. Forwarded from the GraphQL
+ * Structured per-field validation detail, mirroring the upstream
+ * source-of-truth `ErrorField` shape. Forwarded from the GraphQL
  * `extensions.fields` entries when a mutation returns a validation error.
  *
  * All fields are optional — the wire boundary is defensive, and every

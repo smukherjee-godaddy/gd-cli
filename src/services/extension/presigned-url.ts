@@ -75,7 +75,7 @@ export function getUploadTargetEffect(
 
     // Use the shared mapGraphQLError so presigned-URL failures produce
     // the same tagged-error classification and envelope shape as the rest
-    // of the app-registry-api calls (ServerError with a `kind` discriminant
+    // of the source-of-truth calls (ServerError with a `kind` discriminant
     // for classified server errors, AuthenticationError for auth failures,
     // NetworkError with HTTP context for unknown/transport failures).
     const response = yield* Effect.tryPromise({
