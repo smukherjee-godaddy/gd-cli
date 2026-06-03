@@ -730,6 +730,7 @@ const appInit = Command.make(
           url: appData.url,
           proxy_url: appData.proxyUrl,
           authorization_scopes: appData.authorizationScopes,
+          oauth_grant_types: ["authorization_code", "client_credentials"],
           client_id: appData.clientId,
           files_written: {
             config: getConfigFilePath(environment),
