@@ -1,3 +1,4 @@
+import readline from "node:readline";
 import * as Command from "@effect/cli/Command";
 import * as Options from "@effect/cli/Options";
 import * as Effect from "effect/Effect";
@@ -7,8 +8,22 @@ import {
   authStatusEffect,
 } from "../../core/auth";
 import { envGetEffect } from "../../core/environment";
+import {
+  checkOnboardingStatusEffect,
+  completeOnboardingEffect,
+} from "../../core/onboarding";
 import type { NextAction } from "../agent/types";
 import { EnvelopeWriter } from "../services/envelope-writer";
+
+// ---------------------------------------------------------------------------
+// Agreement URLs
+// ---------------------------------------------------------------------------
+
+const AGREEMENT_URLS = {
+  tos: "https://developer.commerce.godaddy.com/legal/agreements/terms-of-use",
+  privacy: "https://developer.commerce.godaddy.com/legal/agreements/privacy-policy",
+  developer: "https://developer.commerce.godaddy.com/legal/agreements/developer-agreement",
+};
 
 // ---------------------------------------------------------------------------
 // Colocated next_actions
@@ -27,6 +42,18 @@ const authLoginActions: NextAction[] = [
   {
     command: "godaddy application list",
     description: "List applications for the active account",
+  },
+  { command: "godaddy auth logout", description: "Logout" },
+];
+
+const authLoginOnboardingActions: NextAction[] = [
+  {
+    command: "godaddy application init",
+    description: "Create your first application",
+  },
+  {
+    command: "godaddy auth status",
+    description: "Verify current authentication status",
   },
   { command: "godaddy auth logout", description: "Logout" },
 ];
@@ -82,11 +109,86 @@ const authLogin = Command.make(
                 .filter((t) => t.length > 0),
             )
           : undefined;
+
+      // Show agreement links before SSO — skip in non-interactive/CI environments
+      if (process.stdin.isTTY) {
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              const rl = readline.createInterface({
+                input: process.stdin,
+                output: process.stdout,
+              });
+              const prompt = [
+                "",
+                "By continuing, you agree to the GoDaddy Developer terms:",
+                "",
+                `  Terms of Service:      ${AGREEMENT_URLS.tos}`,
+                `  Privacy Policy:        ${AGREEMENT_URLS.privacy}`,
+                `  Developer Agreement:   ${AGREEMENT_URLS.developer}`,
+                "",
+                "Press Enter to accept and continue...",
+              ].join("\n");
+              rl.question(prompt, () => {
+                rl.close();
+                resolve();
+              });
+              rl.on("error", () => {
+                rl.close();
+                resolve();
+              });
+            }),
+        );
+      }
+
       const loginResult = yield* authLoginEffect({ additionalScopes });
-      const environment = yield* envGetEffect().pipe(
-        Effect.map(String),
-        Effect.orElseSucceed(() => "unknown"),
+      const env = yield* envGetEffect().pipe(
+        Effect.orElseSucceed(() => "ote" as const),
       );
+      const environment = String(env);
+
+      // Check onboarding status — non-fatal if the call fails
+      let onboardingError: string | undefined;
+      const onboardingStatus = yield* checkOnboardingStatusEffect().pipe(
+        Effect.tap((status) =>
+          Effect.sync(() =>
+            console.error("[DEBUG] onboarding status response:", JSON.stringify(status)),
+          ),
+        ),
+        Effect.catchAll((err) => {
+          console.error("[DEBUG] onboarding status error:", err.message);
+          onboardingError = err.message;
+          return Effect.succeed(null);
+        }),
+      );
+
+      // New user (PENDING) — complete onboarding via single API call
+      if (onboardingStatus?.status === "PENDING") {
+        let onboardingResult: { organizationId: string } | null = null;
+        onboardingResult = yield* completeOnboardingEffect().pipe(
+          Effect.catchAll((err) => {
+            onboardingError = err.message;
+            return Effect.succeed(null);
+          }),
+        );
+
+        yield* writer.emitSuccess(
+          "godaddy auth login",
+          {
+            authenticated: loginResult.success,
+            environment,
+            expires_at: loginResult.expiresAt?.toISOString(),
+            scopes_requested: additionalScopes,
+            onboarding: onboardingResult ? "complete" : "failed",
+            org_id: onboardingResult?.organizationId,
+            ...(onboardingError
+              ? { note: `Onboarding error: ${onboardingError}` }
+              : {}),
+          },
+          authLoginOnboardingActions,
+        );
+        return;
+      }
 
       yield* writer.emitSuccess(
         "godaddy auth login",
@@ -95,6 +197,11 @@ const authLogin = Command.make(
           environment,
           expires_at: loginResult.expiresAt?.toISOString(),
           scopes_requested: additionalScopes,
+          onboarding: onboardingStatus?.status === "ACTIVE" ? "complete" : undefined,
+          org_id: onboardingStatus?.orgId,
+          ...(onboardingStatus === null
+            ? { note: `Could not verify onboarding status: ${onboardingError}` }
+            : {}),
         },
         authLoginActions,
       );
