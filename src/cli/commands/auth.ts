@@ -21,8 +21,10 @@ import { EnvelopeWriter } from "../services/envelope-writer";
 
 const AGREEMENT_URLS = {
   tos: "https://developer.commerce.godaddy.com/legal/agreements/terms-of-use",
-  privacy: "https://developer.commerce.godaddy.com/legal/agreements/privacy-policy",
-  developer: "https://developer.commerce.godaddy.com/legal/agreements/developer-agreement",
+  privacy:
+    "https://developer.commerce.godaddy.com/legal/agreements/privacy-policy",
+  developer:
+    "https://developer.commerce.godaddy.com/legal/agreements/developer-agreement",
 };
 
 // ---------------------------------------------------------------------------
@@ -150,13 +152,7 @@ const authLogin = Command.make(
       // Check onboarding status — non-fatal if the call fails
       let onboardingError: string | undefined;
       const onboardingStatus = yield* checkOnboardingStatusEffect().pipe(
-        Effect.tap((status) =>
-          Effect.sync(() =>
-            console.error("[DEBUG] onboarding status response:", JSON.stringify(status)),
-          ),
-        ),
         Effect.catchAll((err) => {
-          console.error("[DEBUG] onboarding status error:", err.message);
           onboardingError = err.message;
           return Effect.succeed(null);
         }),
@@ -197,7 +193,8 @@ const authLogin = Command.make(
           environment,
           expires_at: loginResult.expiresAt?.toISOString(),
           scopes_requested: additionalScopes,
-          onboarding: onboardingStatus?.status === "ACTIVE" ? "complete" : undefined,
+          onboarding:
+            onboardingStatus?.status === "ACTIVE" ? "complete" : undefined,
           org_id: onboardingStatus?.orgId,
           ...(onboardingStatus === null
             ? { note: `Could not verify onboarding status: ${onboardingError}` }
