@@ -98,8 +98,14 @@ const authLogin = Command.make(
       ),
       Options.repeated,
     ),
+    acceptAgreements: Options.boolean("accept-agreements").pipe(
+      Options.withDescription(
+        "Accept GoDaddy Developer agreements non-interactively (required for CI/scripts)",
+      ),
+      Options.withDefault(false),
+    ),
   },
-  ({ scope }) =>
+  ({ scope, acceptAgreements }) =>
     Effect.gen(function* () {
       const writer = yield* EnvelopeWriter;
       const additionalScopes =
@@ -111,37 +117,6 @@ const authLogin = Command.make(
                 .filter((t) => t.length > 0),
             )
           : undefined;
-
-      // Show agreement links before SSO — skip in non-interactive/CI environments
-      if (process.stdin.isTTY) {
-        yield* Effect.promise(
-          () =>
-            new Promise<void>((resolve) => {
-              const rl = readline.createInterface({
-                input: process.stdin,
-                output: process.stdout,
-              });
-              const prompt = [
-                "",
-                "By continuing, you agree to the GoDaddy Developer terms:",
-                "",
-                `  Terms of Service:      ${AGREEMENT_URLS.tos}`,
-                `  Privacy Policy:        ${AGREEMENT_URLS.privacy}`,
-                `  Developer Agreement:   ${AGREEMENT_URLS.developer}`,
-                "",
-                "Press Enter to accept and continue...",
-              ].join("\n");
-              rl.question(prompt, () => {
-                rl.close();
-                resolve();
-              });
-              rl.on("error", () => {
-                rl.close();
-                resolve();
-              });
-            }),
-        );
-      }
 
       const loginResult = yield* authLoginEffect({ additionalScopes });
       const env = yield* envGetEffect().pipe(
@@ -158,10 +133,61 @@ const authLogin = Command.make(
         }),
       );
 
-      // New user (PENDING) — complete onboarding via single API call
+      // New user (PENDING) — collect agreement acceptance then complete onboarding
       if (onboardingStatus?.status === "PENDING") {
-        let onboardingResult: { organizationId: string } | null = null;
-        onboardingResult = yield* completeOnboardingEffect().pipe(
+        // Non-interactive without explicit flag: refuse to accept agreements silently
+        if (!process.stdin.isTTY && !acceptAgreements) {
+          yield* writer.emitError(
+            "godaddy auth login",
+            {
+              code: "AGREEMENTS_REQUIRED",
+              message:
+                "Agreement acceptance is required to complete onboarding. Re-run interactively or pass --accept-agreements to confirm acceptance of the GoDaddy Developer terms.",
+            },
+            "Run: godaddy auth login --accept-agreements",
+            [
+              {
+                command: "godaddy auth login --accept-agreements",
+                description:
+                  "Accept GoDaddy Developer agreements non-interactively",
+              },
+            ],
+          );
+          return;
+        }
+
+        // TTY: show agreement prompt on stderr before recording acceptance
+        if (process.stdin.isTTY) {
+          yield* Effect.promise(
+            () =>
+              new Promise<void>((resolve) => {
+                const rl = readline.createInterface({
+                  input: process.stdin,
+                  output: process.stderr,
+                });
+                const prompt = [
+                  "",
+                  "By continuing, you agree to the GoDaddy Developer terms:",
+                  "",
+                  `  Terms of Service:      ${AGREEMENT_URLS.tos}`,
+                  `  Privacy Policy:        ${AGREEMENT_URLS.privacy}`,
+                  `  Developer Agreement:   ${AGREEMENT_URLS.developer}`,
+                  "",
+                  "Press Enter to accept and continue...",
+                ].join("\n");
+                rl.question(prompt, () => {
+                  rl.close();
+                  resolve();
+                });
+                rl.on("error", () => {
+                  rl.close();
+                  resolve();
+                });
+              }),
+          );
+        }
+
+        const onboardingResult = yield* completeOnboardingEffect().pipe(
           Effect.catchAll((err) => {
             onboardingError = err.message;
             return Effect.succeed(null);
