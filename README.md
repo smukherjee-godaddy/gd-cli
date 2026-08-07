@@ -52,7 +52,6 @@ Use `gddy --help` or `gddy tree` to get a comprehensive list of available comman
 - `platform actions` — discover the action contracts an app can declare
 - `platform webhook` — inspect webhook event types for app subscriptions
 
-The Developer Platform command tree is currently an Experimental preview. Enable
-Experimental commands in your environment, then begin with `gddy platform app init`.
+Begin with `gddy platform app init` to create a GoDaddy Platform app.
 
 We're actively working to expand the CLI to cover additional GoDaddy products.

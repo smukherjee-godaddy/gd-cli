@@ -2037,7 +2037,7 @@ mod tests {
     async fn platform_app_list_requires_auth() {
         let cli = Cli::new(
             CliConfig::new("gddy", "GoDaddy developer CLI", "gddy")
-                .with_min_stage(Stage::Experimental)
+                .with_min_stage(Stage::Ga)
                 .with_default_auth_provider("godaddy")
                 .with_module(crate::platform::module()),
         );

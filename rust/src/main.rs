@@ -108,13 +108,10 @@ mod tests {
 
     use cli_engine::{Cli, CliConfig, Stage, environments::EnvTable};
 
-    /// Regression test for a real bug found while wiring feature-flagging up
-    /// properly: with no `min_stage` override anywhere, cli-engine's own
-    /// default (`Stage::Ga`) hides `hosting` and the Developer Platform
-    /// namespace entirely. Guards that the *global* default stays `Ga` per
-    /// product decision — i.e. these stay hidden absent an environment override.
+    /// The global default remains GA: Beta modules such as `hosting` stay
+    /// hidden unless an environment enables them.
     #[tokio::test]
-    async fn beta_and_experimental_modules_stay_hidden_at_the_default_min_stage() {
+    async fn beta_modules_stay_hidden_at_the_default_min_stage() {
         let cli = Cli::new(
             CliConfig::new("gddy", "GoDaddy developer CLI", "gddy")
                 .with_min_stage(Stage::Ga)
@@ -129,28 +126,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn platform_namespace_is_hidden_at_the_default_min_stage() {
+    async fn platform_namespace_is_available_at_the_default_min_stage() {
         let cli = Cli::new(
             CliConfig::new("gddy", "GoDaddy developer CLI", "gddy")
                 .with_min_stage(Stage::Ga)
                 .with_modules(super::all_modules()),
         );
         let output = cli.run(["gddy", "platform", "--help"]).await;
-        assert_ne!(
+        assert_eq!(
             output.exit_code, 0,
-            "platform should stay hidden at the Ga default: {}",
+            "platform should be available at the Ga default: {}",
             output.rendered
         );
     }
 
-    /// The other half of the guard: an environment whose resolved
-    /// `min_stage` is lower than the global default reveals those same
-    /// modules. This is exactly the mechanism `environments.toml`'s
+    /// An environment whose resolved `min_stage` is lower than the global
+    /// default reveals Beta modules. This is exactly the mechanism
+    /// `environments.toml`'s
     /// `min_stage`/`feature_overrides` keys (or `<ENV>_MIN_STAGE`/
     /// `<ENV>_FEATURE_<KEY>` env vars) are meant to drive — see
     /// `crate::environments`'s module doc.
     #[tokio::test]
-    async fn an_environment_min_stage_override_reveals_beta_and_experimental_modules() {
+    async fn an_environment_min_stage_override_reveals_beta_modules() {
         let environments = Arc::new(
             cli_engine::environments::Environments::new("dev")
                 .with_environment("dev", EnvTable::new().with("min_stage", "experimental")),
@@ -165,7 +162,7 @@ mod tests {
         let output = cli.run(["gddy", "hosting", "--help"]).await;
         assert_eq!(
             output.exit_code, 0,
-            "hosting should be revealed under an Experimental-min_stage environment: {}",
+            "hosting should be revealed under an Experimental min_stage environment: {}",
             output.rendered
         );
     }
@@ -174,7 +171,7 @@ mod tests {
     async fn platform_namespace_exposes_the_gpa_command_tree() {
         let cli = Cli::new(
             CliConfig::new("gddy", "GoDaddy developer CLI", "gddy")
-                .with_min_stage(Stage::Experimental)
+                .with_min_stage(Stage::Ga)
                 .with_modules(super::all_modules()),
         );
 
