@@ -1,0 +1,202 @@
+name: main alpha
+
+# Publishes a `gddy` alpha binary on every push to `main`, so people can try
+# the latest build ahead of the next tagged release-please release. The
+# binary is named `gddy` (see rust/Cargo.toml). Output is a single rolling
+# prerelease on the fixed `alpha` tag, overwritten on each push.
+#
+# This repo is PUBLIC, so the install flow uses plain `curl` against the public
+# release assets — no `gh` or auth required (see install.sh).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege by default; only the publish job needs `contents: write` to
+# roll the `alpha` release/tag.
+permissions:
+  contents: read
+
+# The publish job deletes and recreates the single rolling `alpha` release/tag.
+# Serialize runs so two quick pushes can't race the single rolling `alpha`
+# release. cancel-in-progress is false on purpose: the publish job deletes and
+# recreates the release/tag, so a cancellation mid-window could leave `alpha`
+# missing. Queuing instead lets each publish finish atomically; the last one wins.
+concurrency:
+  group: main-alpha
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Install cross
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package gddy
+        shell: bash
+        run: |
+          TARGET="${{ matrix.target }}"
+          ARCHIVE="gddy-${TARGET}"
+          mkdir -p staging
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp "target/${TARGET}/release/gddy.exe" "staging/gddy.exe"
+            # Zip from inside staging/ so gddy.exe sits at the archive root
+            # (matching the tarballs and release.yaml), not under staging/.
+            (cd staging && 7z a "../${ARCHIVE}.zip" gddy.exe)
+            echo "ASSET=rust/${ARCHIVE}.zip" >> "$GITHUB_ENV"
+          else
+            cp "target/${TARGET}/release/gddy" "staging/gddy"
+            chmod 755 "staging/gddy"
+            tar -czf "${ARCHIVE}.tar.gz" -C staging gddy
+            echo "ASSET=rust/${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+
+  publish:
+    name: Publish alpha
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum gddy-*.tar.gz gddy-*.zip > gddy-checksums-sha256.txt
+
+      - name: Publish rolling alpha prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          BUILT_ON="$(date -u +%Y-%m-%d)"
+          REPO="${{ github.repository }}"
+
+          # Roll the single alpha release: drop the old tag + release so assets
+          # and notes reflect the latest commit, then recreate.
+          gh release delete alpha --yes --cleanup-tag || true
+
+          {
+            printf '**Experimental alpha build of the GoDaddy CLI (`gddy`).** Built from `%s` on %s.\n\n' "$SHORT_SHA" "$BUILT_ON"
+            printf 'Tracks the tip of `main` and is overwritten on every push — expect breakage. For a stable release, use the [latest tagged release](https://github.com/%s/releases/latest) instead.\n\n' "$REPO"
+            printf 'Install / update (public repo — no auth needed):\n\n'
+            printf 'macOS / Linux (and Git Bash / MSYS2 / Cygwin on Windows):\n\n'
+            printf '```\n'
+            printf 'curl -fsSL https://github.com/%s/releases/download/alpha/install.sh | bash\n' "$REPO"
+            printf '```\n\n'
+            printf 'Windows (PowerShell):\n\n'
+            printf '```\n'
+            printf 'irm https://github.com/%s/releases/download/alpha/install.ps1 | iex\n' "$REPO"
+            printf '```\n'
+          } > alpha-notes.md
+
+          gh release create alpha \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "main alpha (${SHORT_SHA})" \
+            --notes-file alpha-notes.md \
+            dist/gddy-x86_64-unknown-linux-gnu.tar.gz \
+            dist/gddy-aarch64-unknown-linux-gnu.tar.gz \
+            dist/gddy-x86_64-apple-darwin.tar.gz \
+            dist/gddy-aarch64-apple-darwin.tar.gz \
+            dist/gddy-x86_64-pc-windows-msvc.zip \
+            dist/gddy-checksums-sha256.txt \
+            install.sh \
+            install.ps1

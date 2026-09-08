@@ -1,0 +1,79 @@
+name: API catalog drift
+
+# Regenerates the embedded API catalog from the published specs and fails if the
+# committed catalog is out of sync. Reads the gdcorp-platform spec repos via a
+# GitHub App. The app is installed on the gdcorp-platform org with read-only
+# Contents access; its Client ID and private key are in the GitHub secrets
+# `SPEC_SYNC_CLIENT_ID` and `SPEC_SYNC_PRIVATE_KEY` and are exchanged for a
+# short-lived installation token at job start.
+#
+# The domains v1 `agreements` spec is the exception, pulled from a public
+# developer.godaddy.com endpoint (no app token needed) and is best-effort: a
+# fetch failure logs a warning and leaves `domains-client/openapi/domains.oas3.json`
+# untouched rather than failing this job — see `domains_merge::refresh`.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays ~06:17 UTC
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    # Guard against a hung network fetch to the spec repos burning runner minutes.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Generate spec-sync app token
+        id: spec-sync-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.SPEC_SYNC_CLIENT_ID }}
+          private-key: ${{ secrets.SPEC_SYNC_PRIVATE_KEY }}
+          owner: gdcorp-platform
+          permission-contents: read
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Regenerate catalog from upstream specs
+        # Runs from the job-default working-directory (rust/) — cargo needs the workspace.
+        env:
+          GITHUB_TOKEN: ${{ steps.spec-sync-token.outputs.token }}
+        run: cargo run -p generate-api-catalog
+
+      - name: Fail on drift
+        working-directory: .
+        run: |
+          # manifest.json carries a generated-at timestamp that changes every run;
+          # stage the generated directory, then unstage that timestamp-only file.
+          # The staged diff catches modifications, deletions, and new untracked
+          # domains. generate-api-catalog also refreshes two other files that
+          # drift independently of the catalog JSON, so they're checked
+          # alongside it: domains.oas3.json (progenitor's codegen input for
+          # domains-client — when the best-effort v1 agreements fetch fails,
+          # refresh leaves this file untouched, so "no diff" there correctly
+          # means "no update attempted", not "confirmed in sync") and
+          # hosting-nodejs-public-v1.yaml (the source `gddy hosting nodejs
+          # --schema` metadata is derived from).
+          spec_targets="rust/schemas/api rust/domains-client/openapi/domains.oas3.json rust/schemas/openapi/hosting-nodejs-public-v1.yaml"
+          git add -A -- $spec_targets
+          git restore --staged -- rust/schemas/api/manifest.json
+
+          if ! git diff --cached --quiet -- $spec_targets; then
+            echo "::error::One or more of the embedded API catalog (rust/schemas/api), the domains-client codegen spec (rust/domains-client/openapi/domains.oas3.json), or the hosting-nodejs spec (rust/schemas/openapi/hosting-nodejs-public-v1.yaml) is stale vs upstream specs. Regenerate with: (cd rust && GITHUB_TOKEN=<token> cargo run -p generate-api-catalog) and commit."
+            git diff --cached --stat -- $spec_targets
+            exit 1
+          fi
+          echo "API catalog, domains-client codegen spec, and hosting-nodejs spec are in sync with upstream specs."

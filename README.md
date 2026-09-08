@@ -1,102 +1,81 @@
 # GoDaddy CLI
 
-Agent-first CLI for interacting with GoDaddy Developer Platform.
+Agent-first CLI for interacting with the GoDaddy Developer Platform.
+
+> Looking for the original, TypeScript-based `godaddy` CLI (`@godaddy/cli` on
+> npm)? It's maintained on the `original` branch — including its
+> `godaddy-cli` agent skill, which isn't installable from this branch.
 
 ## Installation
 
-```bash
-npm install -g @godaddy/cli
-godaddy --help
-```
-
-## Output Contract
-
-All executable commands emit JSON envelopes:
-
-```json
-{"ok":true,"command":"godaddy env get","result":{"environment":"ote"},"next_actions":[...]}
-```
-
-```json
-{"ok":false,"command":"godaddy application info demo","error":{"message":"Application 'demo' not found","code":"NOT_FOUND"},"fix":"Use discovery commands such as: godaddy application list or godaddy actions list.","next_actions":[...]}
-```
-
-`--help` remains standard CLI help text.
-`--output` has been removed; all executable command paths return JSON envelopes.
-Use `--pretty` to format envelopes with 2-space indentation for human readability.
-Long-running operations can stream typed NDJSON events with `--follow`, ending with a terminal `result` or `error` event.
-
-## Root Discovery
+### macOS / Linux (and Git Bash / MSYS2 / Cygwin on Windows)
 
 ```bash
-godaddy
+curl -fsSL https://github.com/godaddy/cli/releases/latest/download/install.sh | bash
+gddy --version
 ```
 
-Returns environment/auth snapshots and the full command tree.
+### Windows (PowerShell)
 
-## Global Options
+```powershell
+irm https://github.com/godaddy/cli/releases/latest/download/install.ps1 | iex
+gddy --version
+```
 
-- `-e, --env <environment>`: validate target environment (`ote`, `prod`)
-- `--debug`: enable debug logging (stderr only)
-- `--pretty`: pretty-print JSON envelopes (2-space indentation)
+Both installers download, checksum-verify, and install the binary for your platform. If you'd rather install by hand, download the archives from the [latest release](https://github.com/godaddy/cli/releases/latest) and put the binary on your `PATH`.
 
-## Commands
+Once installed, `gddy update check` / `gddy update apply` handles upgrades in place.
 
-### Environment
+### Agentic Skills
 
-- `godaddy env`
-- `godaddy env list`
-- `godaddy env get`
-- `godaddy env set <environment>`
-- `godaddy env info [environment]`
-
-### Authentication
-
-- `godaddy auth`
-- `godaddy auth login`
-- `godaddy auth logout`
-- `godaddy auth status`
-
-### Application
-
-- `godaddy application` (alias: `godaddy app`)
-- `godaddy application list` (alias: `godaddy app ls`)
-- `godaddy application info <name>`
-- `godaddy application validate <name>`
-- `godaddy application update <name> [--label <label>] [--description <description>] [--status <status>]`
-- `godaddy application enable <name> --store-id <storeId>`
-- `godaddy application disable <name> --store-id <storeId>`
-- `godaddy application archive <name>`
-- `godaddy application init [--name <name>] [--description <description>] [--url <url>] [--proxy-url <proxyUrl>] [--scopes <scopes>] [--config <path>] [--environment <env>]`
-  - `--url` and `--proxy-url` must be publicly-resolvable `http(s)` URLs. `localhost`, loopback (`127.0.0.1`, `::1`), link-local, and RFC1918 private IPs are rejected. For local development, expose a tunnel (e.g. [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/), [ngrok](https://ngrok.com/)) and register the tunnel hostname.
-- `godaddy application release <name> --release-version <version> [--description <description>] [--config <path>] [--environment <env>]`
-- `godaddy application deploy <name> [--config <path>] [--environment <env>] [--follow]`
-
-#### Application Add
-
-- `godaddy application add`
-- `godaddy application add action --name <name> --url <url>`
-- `godaddy application add subscription --name <name> --events <events> --url <url>`
-- `godaddy application add extension`
-- `godaddy application add extension embed --name <name> --handle <handle> --source <source> --target <targets>`
-- `godaddy application add extension checkout --name <name> --handle <handle> --source <source> --target <targets>`
-- `godaddy application add extension blocks --source <source>`
-
-### Webhooks
-
-- `godaddy webhook`
-- `godaddy webhook events`
-
-### Actions
-
-- `godaddy actions`
-- `godaddy actions list`
-- `godaddy actions describe <action>`
-
-## Development
+To install Claude Code skills for the `gddy` CLI, run the following:
 
 ```bash
-pnpm install
-pnpm run build
-pnpm test
+claude plugin marketplace add godaddy/cli
+claude plugin install gddy@godaddy
 ```
+
+For other agents, install using the [`skills`](https://github.com/vercel-labs/skills) CLI.
+
+```bash
+npx skills add godaddy/cli --skill gddy --agent <agent>
+```
+
+Swap `<agent>` for whichever agent you use (`claude-code`, `cursor`, `codex`, `windsurf`, `opencode`, ...). Run `npx skills add --help` for the full list of supported agents.
+
+## Quickstart
+
+```bash
+gddy                              # environment/auth snapshot + full command tree
+gddy auth login                   # opens a browser for OAuth
+gddy domain available example.com # check if a domain is registerable
+gddy domain list                  # list domains in your account
+```
+
+Most commands need authentication. You may be taken through an interactive login process if you are not currently logged in, if your login has expired, or if your last auth token needs additional permissions. Run `gddy auth login` to log in explicitly.
+
+For non-interactive workflows, you can use a [Personal Access Token (PAT)](https://developer.godaddy.com/en/docs/api-users/auth) instead; store the PAT with `gddy pat add` or use it in a `GDDY_PAT` environment variable.
+
+## What you can do
+
+Use `gddy --help` or `gddy tree` to get a comprehensive list of available commands. Top-level commands include:
+
+- `domain` — list your domains, check availability, get suggestions, and register new ones
+- `dns` — view and edit a domain's DNS records
+
+We're actively working to expand the CLI to cover additional GoDaddy products.
+
+### Developer Platform
+
+The Developer Platform command tree is currently an Experimental preview. [Enable
+Experimental commands](./docs/feature-flags.md) in your environment:
+
+```bash
+export GDDY_MIN_STAGE=experimental
+```
+
+...then begin with `gddy platform app init`.
+
+- `gddy platform app` — create, configure, release, and deploy GoDaddy Platform apps
+- `gddy platform actions` — discover the action contracts an app can declare
+- `gddy platform webhook` — inspect webhook event types for app subscriptions
